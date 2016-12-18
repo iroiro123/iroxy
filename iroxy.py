@@ -1,15 +1,22 @@
 #
-# for mitmproxy 0.18.1 ( 0.18.2 is buggy )
-# Usage: mitmproxy -s iroxy.py -p 8000
-#        mitmproxy -s iroxy.py -R http://upstream:8001 -p 8000
+# Iroxy - semi-transparent proxy
+#   inline script for mitmproxy 0.18.1 ( 0.18.2 is buggy )
+#
+# Usage:
+#   mitmproxy [-p <listen port>] -s 'iroxy.py [spoofed https port]' [-R <fallback server>]
+#   mitmproxy -p 8000 -s iroxy.py
+#   mitmproxy -p 8000 -s iroxy.py -R http://127.0.0.1:8001
+#   mitmproxy -p 8000 -s 'iroxy.py 443'
+#
+# Released under the MIT license.
+# (c) 2016 iroiro123
 #
 
-import re
+import sys
 from mitmproxy import ctx
-from mitmproxy.models.connections import ServerConnection,ClientConnection
+from mitmproxy import exceptions
 from mitmproxy.protocol import Layer,ServerConnectionMixin
 from mitmproxy.protocol.tls import TlsLayer,TlsClientHello
-from mitmproxy import exceptions
 
 class MyTlsLayer(TlsLayer):
 	def __call__(self):
@@ -23,7 +30,8 @@ class MyTlsLayer(TlsLayer):
 			sni = self._client_hello.sni
 		
 		if sni:
-			self.set_server((sni,443))
+			global upstream_tlsport
+			self.set_server((sni,upstream_tlsport))
 			self._establish_tls_with_client_and_server()
 		elif self._client_tls:
 			self._establish_tls_with_client()
@@ -35,14 +43,23 @@ class MyReverseProxy(Layer, ServerConnectionMixin):
 	def __call__(self):
 		layer = self.ctx.next_layer(self) # TlsLayer
 		try:
-			layer.__class__ = MyTlsLayer
 			layer()
 		finally:
 			if self.server_conn:
 				self.disconnect()
 
+def next_layer(layer):
+	if isinstance(layer, TlsLayer) and isinstance(layer.ctx, MyReverseProxy):
+		layer.__class__ = MyTlsLayer
+
 def start():
+	start_with_args(*sys.argv[1:])
+
+def start_with_args(tlsport="443", *argv):
 	ctx.master.options.mode = MyReverseProxy
+	
+	global upstream_tlsport
+	upstream_tlsport = int(tlsport)
 
 def requestheaders(flow):
 	if flow.server_conn:
@@ -76,14 +93,17 @@ def requestheaders(flow):
 	
 	addr = (host,port)
 	
+	flow.request.host = host
+	flow.request.port = port
+	flow.request.scheme = scheme
+	
 	# connect to server
 	flow.server_conn.address = addr
-	flow.server_conn.connect()
+	try:
+		flow.server_conn.connect()
+	except:
+		return
 	
 	# untrusted connection because of no certification
 	if scheme == "https" and not flow.server_conn.tls_established:
 		flow.server_conn.establish_ssl(None, host)
-	
-	flow.request.host = host
-	flow.request.port = port
-	flow.request.scheme = scheme
