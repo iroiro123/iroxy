@@ -1,6 +1,6 @@
 #
 # Iroxy - semi-transparent proxy
-#   inline script for mitmproxy 0.18.1 ( 0.18.2 is buggy )
+#   inline script for mitmproxy 2.0.2
 #
 # Usage:
 #   mitmproxy [-p <listen port>] -s 'iroxy.py [spoofed https port]' [-R <fallback server>]
@@ -15,15 +15,18 @@
 import sys
 from mitmproxy import ctx
 from mitmproxy import exceptions
-from mitmproxy.protocol import Layer,ServerConnectionMixin
-from mitmproxy.protocol.tls import TlsLayer,TlsClientHello
+from mitmproxy.proxy.protocol import Layer,ServerConnectionMixin
+from mitmproxy.proxy.protocol.tls import TlsLayer,TlsClientHello
+from mitmproxy.proxy.protocol.http1 import Http1Layer
+from mitmproxy.connections import ServerConnection
 
 class MyTlsLayer(TlsLayer):
 	def __call__(self):
 		try:
 			self._client_hello = TlsClientHello.from_client_conn(self.client_conn)
 		except exceptions.TlsProtocolException as e:
-			self.log("Cannot parse Client Hello: %s" % repr(e), "error")
+			#self.log("Cannot parse Client Hello: %s" % repr(e), "error")
+			pass
 		
 		sni = None
 		if self._client_hello:
@@ -45,25 +48,28 @@ class MyReverseProxy(Layer, ServerConnectionMixin):
 		try:
 			layer()
 		finally:
-			if self.server_conn:
+			if self.server_conn.connected():
 				self.disconnect()
 
 def next_layer(layer):
 	if isinstance(layer, TlsLayer) and isinstance(layer.ctx, MyReverseProxy):
 		layer.__class__ = MyTlsLayer
+	if isinstance(layer, Http1Layer):
+		layer.server_conn = ServerConnection.make_dummy(("127.0.0.1", 80))
+
 
 def start():
 	start_with_args(*sys.argv[1:])
 
 def start_with_args(tlsport="443", *argv):
-	ctx.master.options.mode = MyReverseProxy
+	ctx.master.options._opts["mode"] = MyReverseProxy
 	
 	global upstream_tlsport
 	upstream_tlsport = int(tlsport)
 
 def requestheaders(flow):
-	if flow.server_conn:
-		return
+	#if flow.server_conn:
+	#	return
 	
 	if flow.client_conn.ssl_established:
 		scheme = "https"
